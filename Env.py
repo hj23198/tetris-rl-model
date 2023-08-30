@@ -8,7 +8,7 @@ import torch
 class Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 100}
 
-    def __init__(self, render_mode=None, size=5) -> None:
+    def __init__(self, render_mode=None) -> None:
         self.render_mode = render_mode
         self.observation_space = gym.spaces.Dict({
             "board":gym.spaces.Box(0, 1, (30, 10), dtype=np.bool_),

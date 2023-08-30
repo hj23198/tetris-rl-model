@@ -1,5 +1,7 @@
 use pyo3;
 use pyo3::prelude::*;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 
 #[pymodule]
@@ -109,11 +111,13 @@ impl Env {
 
     fn get_attached_state(&self) -> Vec<Vec<bool>> {
         let mut display = self.game.board.state.clone();
-        let ysize = self.game.board.piece.state.len();
-        let xsize = self.game.board.piece.state[0].len();
+        let state = &self.game.board.piece.state_list_pointer[self.game.board.piece.rotation as usize];
+
+        let ysize = state.len();
+        let xsize = state[0].len();
         for y in 0..ysize {
             for x in 0..xsize {
-                if self.game.board.piece.state[y][x] {
+                if state[y][x] {
                     display[(self.game.board.piece.location.y + y as i8) as usize]
                         [(self.game.board.piece.location.x + x as i8) as usize] = true;
                 }
@@ -128,6 +132,7 @@ struct Bag {
     starting_pieces: Vec<String>,
     starting_location: Point,
     current_pieces: Vec<String>,
+    piece_state_generator: PieceStates
 }
 
 impl Bag {
@@ -149,6 +154,7 @@ impl Bag {
             current_pieces: temp_bag,
             starting_location: location,
             queue: queue,
+            piece_state_generator: PieceStates::new()
         };
     }
 
@@ -165,7 +171,7 @@ impl Bag {
         let selected_piece = self.queue[0].clone();
         self.queue.remove(0);
 
-        return Piece::new(selected_piece, self.starting_location.clone());
+        return Piece::new(selected_piece, self.starting_location.clone(), &self.piece_state_generator);
     }
 }
 
@@ -236,12 +242,12 @@ impl Game {
     pub fn hold(&mut self) {
         match self.board.hold_piece {
             Some(_) => {
-                let temp = Piece::new(self.board.piece.name.clone(), self.board.bag.starting_location.clone());
+                let temp = Piece::new(self.board.piece.name.clone(), self.board.bag.starting_location.clone(), &self.board.bag.piece_state_generator);
                 self.board.piece = self.board.hold_piece.clone().unwrap();
                 self.board.hold_piece = Some(temp);
             }
             None => {
-                let mut piece = Piece::new(self.board.piece.name.clone(), self.board.bag.starting_location.clone());
+                let mut piece = Piece::new(self.board.piece.name.clone(), self.board.bag.starting_location.clone(), &self.board.bag.piece_state_generator);
                 piece.location = self.board.bag.starting_location.clone();
                 self.board.hold_piece = Some(piece);
                 self.board.piece = self.board.bag.grab();
@@ -317,19 +323,19 @@ impl Board {
             return;
         }
 
-        let output: (Vec<Vec<bool>>, [[i8; 2]; 5]);
+        let output: (u8, [[i8; 2]; 5]);
         if is_cw {
             output = self.piece.try_rotate_cw();
         } else {
             output = self.piece.try_rotate_ccw();
         }
 
-        let state: Vec<Vec<bool>> = output.0;
+        let rotation  = output.0;
         let kick_table: [[i8; 2]; 5] = output.1;
         let mut chosen_kick: Option<[i8; 2]> = None;
 
         for i in 0..5 {
-            if self.can_fit(&state, kick_table[i][0], kick_table[i][1]) {
+            if self.can_fit(&self.piece.state_list_pointer, kick_table[i][0], kick_table[i][1], rotation) {
                 chosen_kick = Some(kick_table[i]);
                 break;
             }
@@ -355,12 +361,13 @@ impl Board {
         if self.can_fit_offset(0, 0) == false {
             println!("WARNING: attached piece does not fit");
         }
-        let ysize = self.piece.state.len();
-        let xsize = self.piece.state[0].len();
+        let state = &self.piece.state_list_pointer[self.piece.rotation as usize];
+        let ysize = state.len();
+        let xsize = state[0].len();
 
         for y in 0..ysize {
             for x in 0..xsize {
-                if self.piece.state[y][x] {
+                if state[y][x] {
                     self.state[(self.piece.location.y + y as i8) as usize]
                         [(self.piece.location.x + x as i8) as usize] = true;
                 }
@@ -389,12 +396,13 @@ impl Board {
 
     fn display_with_attatched(&self) {
         let mut display = self.state.clone();
-        let ysize = self.piece.state.len();
-        let xsize = self.piece.state[0].len();
+        let state = &self.piece.state_list_pointer[self.piece.rotation as usize];
+        let ysize = state.len();
+        let xsize = state[0].len();
 
         for y in 0..ysize {
             for x in 0..xsize {
-                if self.piece.state[y][x] {
+                if state[y][x] {
                     display[(self.piece.location.y + y as i8) as usize]
                         [(self.piece.location.x + x as i8) as usize] = true;
                 }
@@ -419,7 +427,8 @@ impl Board {
     }
 
     /// Returns true if piece can be placed at location
-    fn can_fit(&self, state: &Vec<Vec<bool>>, x: i8, y: i8) -> bool {
+    fn can_fit(&self, all_states: &Arc<Vec<Vec<Vec<bool>>>>, x: i8, y: i8, rotation: u8) -> bool {
+        let state = &all_states[rotation as usize];
         let ysize = state.len();
         let xsize = state[0].len();
 
@@ -450,73 +459,112 @@ impl Board {
     /// Returns true if current piece can be placed its current location with an offset
     fn can_fit_offset(&self, dx: i8, dy: i8) -> bool {
         self.can_fit(
-            &self.piece.state,
+            &self.piece.state_list_pointer,
             self.piece.location.x as i8 + dx,
             self.piece.location.y as i8 + dy,
+            self.piece.rotation
         )
     }
+}
+
+struct PieceStates {
+    states: Vec<Arc<Vec<Vec<Vec<bool>>>>>,
+    key: HashMap<String, u8>
+}
+
+impl PieceStates {
+    fn new() -> PieceStates {
+
+        let mut states: Vec<Arc<Vec<Vec<Vec<bool>>>>> = Vec::new();
+        for name in ["I", "J", "L", "S", "Z", "T", "O"] {
+            let mut state_list: Vec<Vec<Vec<bool>>> = Vec::with_capacity(7);
+            let mut piece = generate_piece(&name.to_string());
+            for _ in 0..3 {
+                state_list.push(piece.clone());
+                piece = rotate_piece(&piece, true);
+            }
+            states.push(Arc::new(state_list));
+        }
+        let key = HashMap::from([("I".to_string(), 0), ("J".to_string(), 1), ("L".to_string(), 2), ("S".to_string(), 3), ("Z".to_string(), 4), ("T".to_string(), 5), ("O".to_string(), 6)]);
+
+        return PieceStates {states: states, key: key}
+    }
+
+    // fn new() {
+    //     let mut map: HashMap<String, Vec<u8>> = HashMap::new();
+    //     for name in ["I", "J", "L", "S", "Z", "T", "O"] {
+    //         let mut values = Vec::with_capacity(3);
+    //         for i in 0..3 {
+    //             values.push(i);
+    //         }
+    //         map[name] = values;
+
+    //     }
+
+
+    // }
 }
 
 #[derive(Clone)]
 struct Piece {
     name: String,
-    state: Vec<Vec<bool>>,
+    state_list_pointer: Arc<Vec<Vec<Vec<bool>>>>,
     rotation: u8,
-    location: Point,
+    location: Point
 }
-
-//TODO: find location to spawn new piece
 impl Piece {
-    fn new(piece_type: String, location: Point) -> Piece {
-        Piece {
-            name: piece_type.clone(),
-            state: generate_piece(&piece_type),
-            rotation: 0,
-            location: location,
-        }
+    fn new(piece_type: String, location: Point, state_ref: &PieceStates) -> Piece {
+        let state_list_pointer = Arc::clone(&state_ref.states[state_ref.key[&piece_type] as usize]);
+        let rotation: u8 = 0;
+        return Piece {
+            name: piece_type,
+            state_list_pointer: state_list_pointer,
+            rotation: rotation,
+            location: location
+        };
     }
 
-    /// Returns vector representation of clockwise rotated piece and list of new coordinates
-    fn try_rotate_cw(&self) -> (Vec<Vec<bool>>, [[i8; 2]; 5]) {
-        let rotation_state = rotate_piece(&self.state, true);
-        //let rotation_amount = (self.rotation + 1) % 4;  //TODO REMOVE?
+    fn get_state(&self) {
+
+    }
+
+    fn try_rotate_cw(&self) -> (u8, [[i8; 2]; 5]) {
+        let next_rotation = (self.rotation + 1) % 4;
         let mut kick_table = get_rotation_offset(self.name.to_string() == "I", true, self.rotation);
         for i in 0..5 {
             kick_table[i][0] += self.location.x as i8;
             kick_table[i][1] += self.location.y as i8;
         }
-        return (rotation_state, kick_table);
+        return (next_rotation, kick_table);
     }
 
-    /// Rotates piece state after clockwise rotation
-    fn do_rotate_cw(&mut self) {
-        self.state = rotate_piece(&self.state, true);
-        self.rotation = (self.rotation + 1) % 4
-    }
+    fn try_rotate_ccw(&self) -> (u8, [[i8; 2]; 5]) {
+        let next_rotation = (self.rotation + 3) % 4;
 
-    /// Returns vector representation of counter clockwise rotated piece and list of new coordinates
-    fn try_rotate_ccw(&self) -> (Vec<Vec<bool>>, [[i8; 2]; 5]) {
-        let rotation_state = rotate_piece(&self.state, false);
-        //let rotation_amount = (self.rotation + 3) % 4; //TODO REMOVE?
         let mut kick_table =
             get_rotation_offset(self.name.to_string() == "I", false, self.rotation);
         for i in 0..5 {
             kick_table[i][0] += self.location.x as i8;
             kick_table[i][1] += self.location.y as i8;
         }
-        return (rotation_state, kick_table);
+        return (next_rotation, kick_table)
     }
 
-    /// Rotates piece state after counter clockwise rotation
-    fn do_rotate_ccw(&mut self) {
-        self.state = rotate_piece(&self.state, false);
-        self.rotation = (self.rotation + 3) % 4
+    fn do_rotate_cw(&mut self) {
+        self.rotation = (self.rotation + 1) % 4;
     }
+
+    fn do_rotate_ccw(&mut self) {
+        self.rotation = (self.rotation + 3) % 4;
+    }
+        
+
 }
 
 /// Returns coodinate shift for a rotation based on SRS rotation system
 /// from https://tetris.wiki/Super_Rotation_System
 fn get_rotation_offset(is_i: bool, is_cw: bool, piece_orientation: u8) -> [[i8; 2]; 5] {
+    //TODO theres no way I actually typed all of these in correctly 
     if is_i {
         if is_cw {
             match piece_orientation {
@@ -555,9 +603,7 @@ fn get_rotation_offset(is_i: bool, is_cw: bool, piece_orientation: u8) -> [[i8; 
 }
 
 /// Only works for nxn matricies.
-/// Rotates given piece state into new piece state. Point is defined as the coordinates of the
-/// bottom left the piece's bounding box, where the center of rotation is considered to be (0, 0) on
-/// the coordinate plane.
+/// Rotates given piece state into new piece state. 
 fn rotate_piece(current_state: &Vec<Vec<bool>>, is_cw: bool) -> Vec<Vec<bool>> {
     let mut matrix: Vec<Vec<bool>> = current_state.clone();
     let length = matrix.len();
