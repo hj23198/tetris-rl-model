@@ -483,6 +483,7 @@ impl PieceStates {
                 state_list.push(piece.clone());
                 piece = rotate_piece(&piece, true);
             }
+            state_list.push(piece);
             states.push(Arc::new(state_list));
         }
         let key = HashMap::from([("I".to_string(), 0), ("J".to_string(), 1), ("L".to_string(), 2), ("S".to_string(), 3), ("Z".to_string(), 4), ("T".to_string(), 5), ("O".to_string(), 6)]);
